@@ -1,0 +1,185 @@
+---
+title: "Project"
+author: "Clayton Walther"
+date: "2024-04-22"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Set Up ##
+
+### Packages
+```{r,message=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(modelr)
+library(stringr)
+library(glmnet)
+```
+
+### Enter your own WD
+```{r}
+setwd("/Users/claytonwalther/Desktop/24S/STAT ML/Project")
+```
+
+## New Data ##
+```{r}
+data<-read.csv("totals_data.csv")
+vegas0<-read.csv("vegas.txt")
+vegas1<-read.csv("vegas (1).txt")
+vegas2<-read.csv("vegas (2).txt")
+vegas3<-read.csv("vegas (3).txt")
+vegas4<-read.csv("vegas (4).txt")
+vegas5<-read.csv("vegas (5).txt")
+vegas6<-read.csv("vegas (6).txt")
+
+vegas<-data.frame(rbind(vegas0,vegas1,vegas2,vegas3,vegas4,vegas5,vegas6))
+vegas<-vegas[vegas$Location=="away",]
+
+odds<-vegas[,50]
+odds<-data.frame(odds)
+vegas<-data.frame(vegas[,49])
+rownames(vegas)<-NULL
+colnames(vegas)<-"Average_Line_OU"
+```
+
+## Split the data into training and testing sets
+```{r}
+set.seed(91202)
+train_idx = sample.int(nrow(data), nrow(data)*0.5)
+train = data[train_idx,]
+test = data[-train_idx,]
+train.odds<-data.frame(odds[train_idx,])
+test.odds<-data.frame(odds[-train_idx,])
+```
+
+## Model selection
+
+### Stepwise
+```{r,eval=FALSE,results='hide'}
+modfull<-lm(total~.,data = train)
+modnull<-lm(total~1,data = train)
+
+both1 = stats::step(modnull, 
+                    scope=list(lower=formula(modnull),upper=formula(modfull)),
+                    direction="both")
+```
+```{r,eval=FALSE}
+summary(both1) 
+```
+
+### Lasso
+```{r}
+set.seed(91202)
+X<-model.matrix(total~0+.,data=train)
+Y<-train$total
+fit.cv <- cv.glmnet(X, Y, alpha=1)
+best_lambda <- fit.cv$lambda.min
+best_lasso <- glmnet(X, Y, alpha=1,lambda = best_lambda)
+```
+
+We decided on the Lasso model. 
+
+## Make prediction
+```{r}
+X.test<-model.matrix(total~0+.,data=test)
+pred<-data.frame(predict(best_lasso,X.test))
+colnames(pred)<-"Prediction"
+```
+
+## Make new dataframe
+```{r}
+vegas_test<-data.frame(vegas[-train_idx,])
+colnames(vegas_test)<-"Average_Line_OU"
+
+pred_line<-cbind(pred,vegas_test,test$total)
+
+pred_line$y<-as.factor(ifelse(pred_line$`test$total`>pred_line$Average_Line_OU,1,0))
+
+pred_line<-pred_line[,-3]
+```
+
+## Split again
+```{r}
+set.seed(91202)
+train_idx = sample.int(nrow(pred_line), nrow(pred_line)*0.5)
+train = pred_line[train_idx,]
+test = pred_line[-train_idx,]
+```
+
+## Build model
+```{r}
+model<-glm(y~.,data=train, family = "binomial")
+```
+
+## Generate probabilities
+```{r}
+LogReg.add1 <- test %>%
+  gather_predictions(model, type = "response")  %>%
+  rename(prob_y = pred) %>%
+  mutate(pred_y = as.factor( if_else( prob_y >= 0.5, 1, 0 )),
+         y = as.factor( y ))
+```
+
+## Accuracy 
+```{r}
+mean(LogReg.add1$y==LogReg.add1$pred_y,na.rm=T)
+```
+
+Note: In order to be profitable when betting on -110 odds (most common for total over/unders), your bets must hit 52.4% of the time. This model hits 54.4%. 
+
+## What about at the extremes
+```{r}
+df1<-LogReg.add1[LogReg.add1$prob_y<0.4,]
+mean(df1$y==df1$pred_y,na.rm=T)
+```
+```{r}
+df2<-LogReg.add1[LogReg.add1$prob_y>0.6,]
+mean(df2$y==df2$pred_y,na.rm=T)
+```
+
+When our model assigned a probability less than 0.4, it had a classification accuracy of 74%. When our model assigned a probability greater than 0.6, it had an accuracy of 62%. 
+
+## Now convert probabilities into American odds, compare
+```{r}
+LogReg.add1<-LogReg.add1%>%
+  mutate(new_odds=ifelse(prob_y>0.5,(prob_y*100)/(prob_y-1),(100/prob_y)-100))
+```
+```{r}
+test.test.odds<-test.odds[-train_idx,]
+LogReg.add1$vegas_odds<-test.test.odds
+head(LogReg.add1,10)
+```
+
+## See if adding Vegas odds leads to more accurate predictions
+```{r}
+set.seed(91202)
+train_idx = sample.int(nrow(pred_line), nrow(pred_line)*0.5)
+train = pred_line[train_idx,]
+test = pred_line[-train_idx,]
+train.test.odds<-test.odds[train_idx,]
+test.test.odds<-test.odds[-train_idx,]
+
+train<-cbind(train,train.test.odds)
+colnames(train)<-c(colnames(pred_line),"Odds")
+test<-cbind(test,test.test.odds)
+colnames(test)<-c(colnames(pred_line),"Odds")
+
+# Build model
+model<-glm(y~.,data=train, family = "binomial")
+
+# Generate probabilities
+LogReg.add2 <- test %>%
+  gather_predictions(model, type = "response")  %>%
+  rename(prob_y = pred) %>%
+  mutate(pred_y = as.factor( if_else( prob_y >= 0.5, 1, 0 )),
+         y = as.factor( y ))
+
+# Accuracy 
+mean(LogReg.add2$y==LogReg.add2$pred_y,na.rm=T)
+```
+
+## Answer is no, adding vegas odds do not help accuracy
